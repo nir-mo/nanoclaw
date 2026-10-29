@@ -35,8 +35,18 @@ check writes `logs/nanoclaw-update-available`.
 
 ## Install
 
+One command deploys the whole box (timezone + upstream setup + auto-compaction + cron):
+
 ```bash
-bash ops/install-cron.sh      # idempotent; re-run anytime to update the jobs
+bash ops/bootstrap.sh
+```
+
+Override defaults if needed: `TZ_NAME=UTC COMPACT_WINDOW=60000 bash ops/bootstrap.sh`.
+
+Just the cron jobs (idempotent; re-run anytime):
+
+```bash
+bash ops/install-cron.sh
 ```
 
 ## Notes
@@ -44,11 +54,15 @@ bash ops/install-cron.sh      # idempotent; re-run anytime to update the jobs
 - **Timezone:** cron times are the box's local time. EC2 defaults to **UTC**
   (03:17 UTC ≈ early morning in most of the world). Either adjust the hours in
   `install-cron.sh`, or set the box once: `sudo timedatectl set-timezone <TZ>`.
-- **Cleanup ≠ fresh conversation.** `cleanup-sessions.sh` is disk hygiene — it
-  prunes *old* artifacts, it does not reset your *active* chat context.
-  NanoClaw's reactive model lets idle sessions go stale on their own, so an
-  overnight gap starts you fresh. If you ever want a hard nightly reset of the
-  live session, that's an `ncl`-level action — confirm the command on the box.
+- **Context stays small automatically — no nightly compact.** NanoClaw
+  auto-compacts the live session via `CLAUDE_CODE_AUTO_COMPACT_WINDOW` (set in
+  `.env` by `bootstrap.sh`), so it never balloons the way OpenClaw did. The
+  nightly `cleanup-sessions.sh` is *disk* hygiene only — it prunes old artifacts,
+  it does not touch the active conversation.
+- **No host-side session reset.** `/new`, `/reset`, `/compact` are chat commands
+  — send `/new` to the bot for an instant fresh start. There is deliberately no
+  cron that force-resets the live session (that would mean poking the session
+  SQLite — fragile, and unnecessary given auto-compaction).
 - **Logs** land in `logs/` (gitignored). Check `logs/ops-*.log`.
 - **Secrets:** never put credentials in these scripts. The security job uses
   sudo; the update check uses only git. Nothing here should hold a secret.
