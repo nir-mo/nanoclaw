@@ -5,9 +5,10 @@
 #   1. sets the box timezone (so cron + logs are local, DST-safe)
 #   2. makes Docker usable by this user (prevents the first-start docker.sock crash)
 #   3. runs upstream setup (deps, WhatsApp pairing, ...)
-#   4. turns on continuous auto-compaction (keeps the session small on its own —
+#   4. points OneCLI's APP_URL at loopback (so Google OAuth callbacks work — see ops/GOOGLE.md)
+#   5. turns on continuous auto-compaction (keeps the session small on its own —
 #      replaces any "nightly compact"; NanoClaw compacts whenever context fills)
-#   5. installs the ops cron jobs (security updates, file cleanup, update check)
+#   6. installs the ops cron jobs (security updates, file cleanup, update check)
 #
 # Re-runnable. Override the defaults with env vars, e.g.:
 #   TZ_NAME=UTC COMPACT_WINDOW=60000 bash ops/bootstrap.sh
@@ -60,20 +61,26 @@ fi
 # 3. Upstream setup (interactive on first run).
 bash ./nanoclaw.sh "$@"
 
-# 4. Continuous auto-compaction. NanoClaw's agent-runner reads this from .env.
+# 4. OneCLI public URL -> loopback, so Google OAuth callbacks work (Google blocks
+#    callbacks to the docker-bridge private IP OneCLI uses by default). See ops/GOOGLE.md.
+bash ./ops/onecli-app-url.sh || true
+
+# 5. Continuous auto-compaction. NanoClaw's agent-runner reads this from .env.
 if [ -f .env ] && ! grep -q '^CLAUDE_CODE_AUTO_COMPACT_WINDOW=' .env; then
   echo "[bootstrap] enabling auto-compaction at ${COMPACT_WINDOW} tokens"
   printf '\n# Auto-compact the session when it reaches this many tokens.\nCLAUDE_CODE_AUTO_COMPACT_WINDOW=%s\n' "$COMPACT_WINDOW" >> .env
 fi
 
-# 5. Ops cron jobs.
+# 6. Ops cron jobs.
 bash ./ops/install-cron.sh
 
 echo ""
 echo "[bootstrap] done — everything wired in one run:"
 echo "  timezone        : $TZ_NAME"
 echo "  docker          : usable by $USER"
+echo "  onecli APP_URL  : loopback (Google OAuth callbacks work)"
 echo "  auto-compaction : ~${COMPACT_WINDOW} tokens (continuous — no nightly compact needed)"
 echo "  cron            : security updates + session file cleanup + update check"
 echo ""
+echo "Google setup + weekly reconnect: see ops/GOOGLE.md"
 echo "Instant hard reset of the conversation: send /new to the bot in chat."
