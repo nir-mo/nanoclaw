@@ -312,6 +312,11 @@ export async function writeSessionMessage(
   // Extract base64 attachment data, save to inbox, replace with file paths
   const content = extractAttachmentFiles(agentGroupId, sessionId, message.id, message.content);
 
+  // WhatsApp/channel media is downloaded to the shared attachments dir; move it into
+  // this session's dir so the agent's /workspace/attachments path resolves (the global
+  // dir cannot be mounted into the agent under the mount-security model).
+  relocateDownloadedAttachments(agentGroupId, sessionId, content);
+
   await withMailboxSession(agentGroupId, sessionId, async (mailbox) => {
     await mailbox.insertMessage({
       id: message.id,
@@ -430,6 +435,60 @@ function extractAttachmentFiles(
   }
 
   return changed ? JSON.stringify(parsed) : contentStr;
+}
+
+/**
+ * Channel adapters (e.g. WhatsApp) download media to the shared DATA_DIR/attachments
+ * dir and set `localPath` to `attachments/<file>` — relative to the container's
+ * /workspace, which is this session's own dir. The bytes themselves sit in the global
+ * dir, and the mount-security model forbids mounting that global dir into the agent, so
+ * the file is invisible in the container. Move each such file into the session's own
+ * attachments/ (served through the existing /workspace mount) so `attachments/<file>`
+ * resolves. localPath is already correct — only the bytes need to move.
+ *
+ * Fully defensive: a relocation failure must never break message staging, so every
+ * error is swallowed (the agent just won't see that attachment, as before the fix).
+ */
+function relocateDownloadedAttachments(agentGroupId: string, sessionId: string, contentStr: string): void {
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(contentStr);
+  } catch {
+    return;
+  }
+  const attachments = parsed.attachments as Array<Record<string, unknown>> | undefined;
+  if (!Array.isArray(attachments)) return;
+
+  const globalRoot = path.join(DATA_DIR, 'attachments');
+  let dir: AnchoredDir | null | undefined;
+  try {
+    for (const att of attachments) {
+      const lp = att.localPath;
+      if (typeof lp !== 'string' || !lp.startsWith('attachments/')) continue;
+      const filename = lp.slice('attachments/'.length);
+      if (!isSafeAttachmentName(filename)) continue;
+      const src = path.join(globalRoot, filename);
+      if (!fs.existsSync(src)) continue; // already relocated, or staged to another session first
+
+      if (dir === undefined) dir = AnchoredDir.open(sessionDir(agentGroupId, sessionId), ['attachments'], true);
+      if (!dir) break;
+
+      try {
+        dir.writeNewFile(filename, fs.readFileSync(src));
+      } catch (err) {
+        const e = err as NodeJS.ErrnoException;
+        if (e.code !== 'EEXIST') {
+          log.warn('Failed to relocate downloaded attachment into session', { sessionId, filename, err });
+          continue;
+        }
+      }
+      fs.rmSync(src, { force: true });
+    }
+  } catch (err) {
+    log.warn('relocateDownloadedAttachments failed', { sessionId, err });
+  } finally {
+    dir?.close();
+  }
 }
 
 /**
