@@ -1205,6 +1205,23 @@ export async function buildMounts(
 
   // Session workspace: mailbox-selected state plus outbox and heartbeat files.
   mounts.push({ hostPath: sessDir, containerPath: '/workspace', readonly: false, mountClass: 'group-state', scope });
+
+  // Inbound channel media (WhatsApp images/docs) is downloaded host-side to
+  // DATA_DIR/attachments and referenced to the agent as `attachments/<file>`
+  // relative to /workspace. But /workspace is the per-session dir, so without
+  // mounting the shared attachments dir the file lands on the host yet is
+  // invisible inside the container (agent sees no /workspace/attachments).
+  // Mount it read-only. (Shared across sessions — make per-session if this
+  // ever goes multi-tenant.)
+  const attachmentsDir = path.join(DATA_DIR, 'attachments');
+  fs.mkdirSync(attachmentsDir, { recursive: true });
+  mounts.push({
+    hostPath: attachmentsDir,
+    containerPath: '/workspace/attachments',
+    readonly: true,
+    mountClass: 'group-state',
+    scope,
+  });
   mounts.push({
     hostPath: sessionContextPath(agentGroup.id, session.id),
     containerPath: '/app/.nanoclaw-session.json',
