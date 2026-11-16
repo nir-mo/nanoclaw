@@ -65,3 +65,6 @@ forks.md
 # Library templates copied in by setup or create_agent are install state.
 /templates/*
 !/templates/README.md
+
+# ops-managed skill (source in ops/skills/, installed by bootstrap)
+container/skills/nanoclaw-update-notice/
