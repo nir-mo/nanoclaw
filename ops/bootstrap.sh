@@ -71,6 +71,15 @@ if [ -f .env ] && ! grep -q '^CLAUDE_CODE_AUTO_COMPACT_WINDOW=' .env; then
   printf '\n# Auto-compact the session when it reaches this many tokens.\nCLAUDE_CODE_AUTO_COMPACT_WINDOW=%s\n' "$COMPACT_WINDOW" >> .env
 fi
 
+# Install ops-provided container skills (idempotent). Additive skills kept in ops/
+# (merge-safe source), copied into the runtime skills dir so the agent loads them
+# — e.g. nanoclaw-update-notice (surfaces update reminders in chat).
+if [ -d ops/skills ]; then
+  mkdir -p container/skills
+  cp -r ops/skills/* container/skills/ 2>/dev/null || true
+  echo "[bootstrap] installed ops skills into container/skills/"
+fi
+
 # 6. Ops cron jobs.
 bash ./ops/install-cron.sh
 
