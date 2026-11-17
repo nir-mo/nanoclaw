@@ -80,6 +80,11 @@ if [ -d ops/skills ]; then
   echo "[bootstrap] installed ops skills into container/skills/"
 fi
 
+# Install skills from the personal plugin marketplace (the skill manifest —
+# see ops/install-marketplace-skills.sh). `|| true`: network-dependent, an
+# offline rebuild should still complete.
+bash ./ops/install-marketplace-skills.sh || true
+
 # 6. Ops cron jobs.
 bash ./ops/install-cron.sh
 
