@@ -2,7 +2,7 @@
  * WhatsApp channel adapter (v2) — native Baileys v7 implementation.
  *
  * Implements ChannelAdapter directly (no Chat SDK bridge) using
- * @whiskeysockets/baileys 7.0.0-rc.9 (pinned — last release, unmaintained).
+ * @whiskeysockets/baileys 7.0.0-rc14 (pinned exactly in package.json).
  * Ports proven v1 infrastructure: getMessage fallback, outgoing queue,
  * group metadata cache, LID mapping, reconnection with backoff.
  *
@@ -111,6 +111,46 @@ const PENDING_QUESTIONS_MAX = 64;
 /** Normalize an option label to a slash command: "Approve" → "/approve" */
 function optionToCommand(option: string): string {
   return '/' + option.toLowerCase().replace(/\s+/g, '-');
+}
+
+type PendingQuestion = { questionId: string; options: NormalizedOption[] };
+/**
+ * What the host did with an answer, read loosely: this file is copied onto cores
+ * of any age, and one from before click outcomes returns nothing (undefined).
+ */
+type AnswerOutcome = 'accepted' | 'refused' | 'closed' | 'ignored' | undefined;
+
+/**
+ * Answers a pending question from a "/option" reply. The host decides, once: the
+ * chat hears the answer only once it is accepted. A refused answer, or one that
+ * decided nothing, keeps the question open (WhatsApp has no private reply, so
+ * nothing is posted). Undefined, at once, when the text answers no pending
+ * question; else the host has the answer on return, and the promise is the rest.
+ */
+export function answerPendingQuestion(
+  pendingQuestions: Map<string, PendingQuestion>,
+  chatJid: string,
+  text: string,
+  sender: string,
+  onAction: ChannelSetup['onAction'],
+  confirm: (option: NormalizedOption) => Promise<unknown>,
+): Promise<{ questionId: string; value: string; outcome: AnswerOutcome }> | undefined {
+  const pending = pendingQuestions.get(chatJid);
+  if (!pending || !text.startsWith('/')) return undefined;
+  const cmd = text.trim().toLowerCase();
+  const matched = pending.options.find((o) => optionToCommand(o.label) === cmd);
+  if (!matched) return undefined;
+  return (async () => {
+    const result: unknown = await onAction(pending.questionId, matched.value, sender);
+    const outcome = typeof result === 'string' ? (result as AnswerOutcome) : undefined;
+    // A core from before click outcomes returns nothing: answered as before.
+    const shown = outcome ?? 'accepted';
+    // 'ignored' can mean the question is still pending, so only these close it.
+    const closes = shown === 'accepted' || shown === 'closed';
+    if (closes && pendingQuestions.get(chatJid) === pending) pendingQuestions.delete(chatJid);
+    if (shown === 'accepted') await confirm(matched);
+    return { questionId: pending.questionId, value: matched.value, outcome };
+  })();
 }
 
 // --- Markdown → WhatsApp formatting ---
@@ -440,13 +480,7 @@ registerChannelAdapter('whatsapp', {
 
     // Pending questions: chatJid → { questionId, options }
     // User replies with /approve, /reject, etc. to answer
-    const pendingQuestions = new Map<
-      string,
-      {
-        questionId: string;
-        options: NormalizedOption[];
-      }
-    >();
+    const pendingQuestions = new Map<string, PendingQuestion>();
 
     // Group sync tracking
     let lastGroupSync = 0;
@@ -573,7 +607,7 @@ registerChannelAdapter('whatsapp', {
       msg: WAMessage,
       normalized: any,
     ): Promise<{
-      attachments: Array<{ type: string; name: string; localPath: string }>;
+      attachments: Array<{ type: string; name: string; localPath: string; isVoiceNote?: boolean }>;
       failures: string[];
     }> {
       const mediaTypes: Array<{ key: string; type: string; ext: string }> = [
@@ -582,10 +616,14 @@ registerChannelAdapter('whatsapp', {
         { key: 'audioMessage', type: 'audio', ext: '.ogg' },
         { key: 'documentMessage', type: 'document', ext: '' },
       ];
-      const results: Array<{ type: string; name: string; localPath: string }> = [];
+      const results: Array<{ type: string; name: string; localPath: string; isVoiceNote?: boolean }> = [];
       const failures: string[] = [];
-      for (const { key, type, ext } of mediaTypes) {
+      for (const { key, type: mediaType, ext } of mediaTypes) {
         if (!normalized[key]) continue;
+        // Push-to-talk audio is a voice note: typed 'voice' as iMessage does, and
+        // flagged for transcription modules that read isVoiceNote.
+        const isVoiceNote = key === 'audioMessage' && normalized[key].ptt === true;
+        const type = isVoiceNote ? 'voice' : mediaType;
         try {
           // Pass reuploadRequest so Baileys can ask WhatsApp to re-upload the
           // media when the direct CDN fetch fails or the media URL has expired
@@ -613,7 +651,12 @@ registerChannelAdapter('whatsapp', {
           fs.mkdirSync(attachDir, { recursive: true });
           const filePath = path.join(attachDir, filename);
           fs.writeFileSync(filePath, buffer);
-          results.push({ type, name: filename, localPath: `attachments/${filename}` });
+          results.push({
+            type,
+            name: filename,
+            localPath: `attachments/${filename}`,
+            ...(isVoiceNote && { isVoiceNote }),
+          });
           log.info('Media downloaded', { type, filename });
         } catch (err) {
           log.warn('Failed to download media', { type, err });
@@ -888,22 +931,23 @@ registerChannelAdapter('whatsapp', {
             const isBotMessage = WHATSAPP_SHARED ? content.startsWith(`${ASSISTANT_NAME}:`) : false;
 
             // Check if this reply answers a pending question via slash command
-            const pending = pendingQuestions.get(chatJid);
-            if (pending && content.startsWith('/')) {
-              const cmd = content.trim().toLowerCase();
-              const matched = pending.options.find((o) => optionToCommand(o.label) === cmd);
-              if (matched) {
-                const voterName = msg.pushName || sender.split('@')[0];
-                setupConfig.onAction(pending.questionId, matched.value, sender);
-                pendingQuestions.delete(chatJid);
-                await sendRawMessage(chatJid, `${matched.selectedLabel} by ${voterName}`);
-                log.info('Question answered', {
-                  questionId: pending.questionId,
-                  value: matched.value,
-                  voterName,
-                });
-                continue; // Don't forward this reply to the agent
-              }
+            const voterName = msg.pushName || sender.split('@')[0];
+            const answering = answerPendingQuestion(
+              pendingQuestions,
+              chatJid,
+              content,
+              sender,
+              (...args) => setupConfig.onAction(...args),
+              (option) => sendRawMessage(chatJid, `${option.selectedLabel} by ${voterName}`),
+            );
+            if (answering) {
+              // Not awaited: the host may take its time, and the rest of this batch
+              // (after a reconnect, every chat's buffered messages) must not wait.
+              void answering.then(
+                (answered) => log.info('Question answered', { ...answered, voterName }),
+                (err: unknown) => log.error('Error answering a WhatsApp question', { err, chatJid }),
+              );
+              continue; // Don't forward this reply to the agent
             }
 
             // Detect explicit @-mentions of the bot in groups. Detail in
