@@ -35,7 +35,7 @@ check writes `logs/nanoclaw-update-available`.
 
 ## Install
 
-One command deploys the whole box (timezone + upstream setup + auto-compaction + cron):
+One command deploys the whole box (timezone + Docker preflight + upstream setup + auto-compaction + cron):
 
 ```bash
 bash ops/bootstrap.sh
